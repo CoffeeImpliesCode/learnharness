@@ -37,6 +37,8 @@ npx electron-builder --win --x64 --publish never
 npx electron-builder --linux --x64 --publish never
 ```
 
+The personal fork also provides `npm run desktop:dist:linux`, which runs the standalone build, payload checks, Electron-runtime smoke and AppImage packaging with publishing disabled. If npm has not downloaded the pinned Electron runtime, run `node node_modules/electron/install.js` first. Personal packages use the fork's GitHub update feed; they cannot be replaced by an upstream auto-update.
+
 ## CI vs release
 
 `.github/workflows/ci.yml` runs on main pushes and pull requests:

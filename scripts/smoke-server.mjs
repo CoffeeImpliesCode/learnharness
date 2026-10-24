@@ -17,13 +17,14 @@
  * 127.0.0.1 on a kernel-assigned
  * free port, NODE_ENV=production, a THROWAWAY LH_DATA_DIR and an EMPTY
  * LH_AUTH_FILE under os.tmpdir() (no real keys or data ever touch it) —
- * polls GET / until 200, then probes the GET-only API surface (graph /
- * models / settings — no side effects). Any non-200, an early server
+ * polls GET / until 200, then probes the API surface and starts/cancels
+ * Codex browser login without visiting the provider or signing in. No
+ * inference or provider token exchange runs. Any non-200, an early server
  * exit, or a 30s boot timeout fails the gate and prints the server's own
- * log tail for diagnosis. The child is ALWAYS killed before exit — a
- * leaked server holds its port against the next run (learned the hard
- * way, same day).
+ * log tail. The child is always killed before exit so it cannot hold
+ * a callback port or interfere with the next run.
  */
+import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { probeEnv, verifyDemoRuntime } from "./smoke-demo-runtime.mjs";
 import { createRequire } from "node:module";
@@ -41,8 +42,8 @@ const RUNTIME = ELECTRON_MODE ? createRequire(import.meta.url)("electron") : pro
 
 const POLL_MS = 500;
 const BOOT_TIMEOUT_MS = 30_000;
-/** GET-only probes — the routes that exercised today's failure class. */
-const PROBES = ["/api/graph", "/api/models", "/api/settings"];
+/** GET-only probes, including the connection-management routes. */
+const PROBES = ["/api/graph", "/api/models", "/api/settings", "/api/connections/subscriptions", "/api/connections/custom"];
 
 if (!fs.existsSync(SERVER)) {
 	console.error("[smoke-server] .next/standalone/server.js missing — run next build first.");
@@ -74,6 +75,55 @@ function get(url) {
 			resolve(0);
 		});
 	});
+}
+
+/** Exercise the traced SDK's real lazy OAuth adapter without an account or network request. */
+async function verifyCodexLogin(url) {
+	const request = async (route, method = "GET", body) => {
+		const response = await fetch(url + route, {
+			method,
+			headers: {
+				Origin: url,
+				"X-LearnHarness-Connections": "1",
+				...(body === undefined ? {} : { "Content-Type": "application/json" }),
+			},
+			...(body === undefined ? {} : { body: JSON.stringify(body) }),
+			signal: AbortSignal.timeout(5000),
+		});
+		assert.equal(response.status, 200, `${method} ${route} failed`);
+		return response.json();
+	};
+	const poll = async (route, predicate) => {
+		const deadline = Date.now() + 10_000;
+		while (Date.now() < deadline) {
+			const attempt = await request(route);
+			assert.equal(attempt.state, "pending", "Codex login ended before its browser prompt");
+			if (predicate(attempt)) return attempt;
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+		throw new Error("Codex login prompt timed out");
+	};
+	const initial = await request("/api/connections/login", "POST", { providerId: "subscription-openai-codex" });
+	assert.equal(typeof initial.id, "string", "Codex login did not create an attempt");
+	const route = `/api/connections/login/${encodeURIComponent(initial.id)}`;
+	try {
+		const method = await poll(route, (attempt) => attempt.prompt?.type === "select");
+		assert.ok(method.prompt.options.some((option) => option.id === "browser"), "Codex browser login unavailable");
+		await request(route, "POST", { promptId: method.prompt.id, value: "browser" });
+		const browser = await poll(route, (attempt) => attempt.events.some((event) => event.type === "auth_url"));
+		const event = browser.events.find((entry) => entry.type === "auth_url");
+		const authorization = new URL(event.url);
+		assert.equal(authorization.origin, "https://auth.openai.com");
+		assert.equal(authorization.searchParams.get("code_challenge_method"), "S256");
+		assert.ok(authorization.searchParams.get("state"), "Codex login omitted OAuth state");
+		console.log("[smoke-server] Codex browser login produced a PKCE authorization link (not opened)");
+	} finally {
+		const cancelled = await request(route, "DELETE");
+		assert.equal(cancelled.state, "cancelled", "Codex login did not cancel");
+	}
+	const status = await request("/api/connections/subscriptions");
+	assert.ok(status.subscriptions.every((entry) => !entry.connected), "Smoke login unexpectedly stored a credential");
+	console.log("[smoke-server] Codex cancellation passed; no subscription connected");
 }
 
 async function main() {
@@ -163,6 +213,7 @@ async function main() {
 			if (status !== 200) throw new Error(`GET ${route} → ${status} (expected 200)`);
 			console.log(`[smoke-server] GET ${route} → 200`);
 		}
+		await verifyCodexLogin(url);
 	} catch (err) {
 		failed = err;
 	} finally {

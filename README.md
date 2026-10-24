@@ -21,6 +21,20 @@ Instead of just giving you an explanation, it uses your answers and thinking to 
 
 ![LearnHarness teaching session](docs/assets/teaching-session.png)
 
+## Personal fork
+
+This fork integrates [upstream draft PR #13](https://github.com/amosblomqvist/learnharness/pull/13): subscription connections and custom OpenAI/Anthropic-compatible endpoints. It also fixes subscription reasoning/tool replay and login cancellation races. These are experimental integrations, not a claim of provider approval or account entitlement. See [connection limits](docs/connections.md).
+
+Build the personal Linux AppImage:
+
+```sh
+npm ci
+node node_modules/electron/install.js
+npm run desktop:dist:linux
+```
+
+The installer is written to `dist/`. On NixOS, launch it with `appimage-run`. Personal builds use version `0.3.4-personal.1` and the `CoffeeImpliesCode/learnharness` update feed, not the upstream feed. No personal release has been published; the upstream downloads below do not contain these changes.
+
 ## How it works
 
 1. **Measure.** Before teaching, the agent finds where your understanding ends on each part the lesson depends on. Your answers, confidence, and thinking show it where to start.

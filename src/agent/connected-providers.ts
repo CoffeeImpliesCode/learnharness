@@ -1,4 +1,4 @@
-import { createProvider, lazyStream, type AssistantMessageEvent, type AssistantMessageEventStream, type Api, type ApiStreamOptions, type CredentialStore, type Model, type Provider, type ProviderStreams } from "@earendil-works/pi-ai";
+import { createProvider, lazyStream, type AssistantMessageEvent, type AssistantMessageEventStream, type Api, type ApiStreamOptions, type CredentialStore, type Model, type Provider, type ProviderStreams, type TranscriptContext } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
@@ -15,10 +15,22 @@ export function subscriptionAliases(builtins: readonly Provider[]): Provider[] {
 			baseUrl: original.baseUrl,
 			auth: { oauth: original.auth.oauth },
 			getModels: () => original.getModels().map((model) => ({ ...model, provider: entry.id, name: `${model.name} · subscription` })),
-			stream: (model, context, options) => aliasStream(model, original.stream({ ...model, provider: entry.provider }, context, options)),
-			streamSimple: (model, context, options) => aliasStream(model, original.streamSimple({ ...model, provider: entry.provider }, context, options)),
+			stream: (model, context, options) => aliasStream(model, original.stream({ ...model, provider: entry.provider }, nativeTranscript(context, entry.id, entry.provider), options)),
+			streamSimple: (model, context, options) => aliasStream(model, original.streamSimple({ ...model, provider: entry.provider }, nativeTranscript(context, entry.id, entry.provider), options)),
 		};
 	});
+}
+
+/** Native SDK replay checks provider identity before keeping signatures and tool item IDs. */
+function nativeTranscript(context: TranscriptContext, alias: string, native: string): TranscriptContext {
+	let messages = context.messages;
+	for (let i = 0; i < messages.length; i++) {
+		const message = messages[i]!;
+		if (message.role !== "assistant" || message.provider !== alias) continue;
+		if (messages === context.messages) messages = messages.slice();
+		messages[i] = { ...message, provider: native };
+	}
+	return messages === context.messages ? context : { ...context, messages };
 }
 
 /** Preserve SDK provider-specific request semantics without losing the selected auth source in history. */

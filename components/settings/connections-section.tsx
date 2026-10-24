@@ -378,12 +378,21 @@ function SubscriptionsGroup() {
 	// login finishing must never overwrite the newer truth.
 	const generation = useRef(0);
 	const alive = useRef(true);
+	const lifetime = useRef(0);
 	const attemptsRef = useRef(attempts);
-	attemptsRef.current = attempts;
+	const attemptEpochs = useRef<Record<string, number>>({});
+	const mutating = useRef(new Set<string>());
+	const polling = useRef(new Set<string>());
 
-	// Dialog close / section switch: drop any pending server login so its
-	// callback listener does not linger. No state is touched (unmounting).
-	useEffect(() => () => void cancelPendingLogins(attemptsRef.current), []);
+	// Keep ownership current before React renders, including close events
+	// that arrive immediately after a login response.
+	const setAttempt = useCallback((providerId: string, attempt?: LoginAttemptView) => {
+		const next = { ...attemptsRef.current };
+		if (attempt) next[providerId] = attempt;
+		else delete next[providerId];
+		attemptsRef.current = next;
+		setAttempts(next);
+	}, []);
 
 	const load = useCallback(async () => {
 		const gen = ++generation.current;
@@ -404,84 +413,121 @@ function SubscriptionsGroup() {
 		void load();
 		return () => {
 			alive.current = false;
+			lifetime.current++;
+			generation.current++;
+			cancelPendingLogins(attemptsRef.current);
 		};
 	}, [load]);
 
 	const setBusyFor = (id: string, v: boolean) => setBusy((b) => ({ ...b, [id]: v }));
 	const setErrorFor = (id: string, e: string | null) => setErrors((x) => ({ ...x, [id]: e }));
 
+	function beginMutation(providerId: string): boolean {
+		if (mutating.current.has(providerId)) return false;
+		mutating.current.add(providerId);
+		attemptEpochs.current[providerId] = (attemptEpochs.current[providerId] ?? 0) + 1;
+		setBusyFor(providerId, true);
+		setErrorFor(providerId, null);
+		return true;
+	}
+	function endMutation(providerId: string) {
+		mutating.current.delete(providerId);
+		setBusyFor(providerId, false);
+	}
+
 	const finish = useCallback(
 		(providerId: string) => {
-			setAttempts((a) => {
-				const { [providerId]: _gone, ...rest } = a;
-				return rest;
-			});
+			setAttempt(providerId);
 			void load();
 			notifySettingsSaved("keys");
 			notifySettingsSaved("models");
 		},
-		[load],
+		[load, setAttempt],
 	);
 
 	const applyAttempt = useCallback(
 		(providerId: string, attempt: LoginAttemptView) => {
 			if (attempt.state === "connected") finish(providerId);
-			else setAttempts((a) => ({ ...a, [providerId]: attempt }));
+			else setAttempt(providerId, attempt);
 		},
-		[finish],
+		[finish, setAttempt],
 	);
 
-	// Poll pending attempts. One timer per pending attempt id.
+	// At most one poll per attempt. Mutations invalidate older snapshots
+	// and pause polling until their newer view has been applied.
 	const pendingKey = Object.values(attempts)
 		.filter((a) => a.state === "pending")
 		.map((a) => `${a.providerId}:${a.id}`)
 		.join("|");
 	useEffect(() => {
 		if (!pendingKey) return;
+		let active = true;
 		const timer = setInterval(() => {
 			for (const entry of pendingKey.split("|")) {
 				const [providerId = "", id = ""] = entry.split(":");
+				if (polling.current.has(id) || mutating.current.has(providerId)) continue;
+				const epoch = attemptEpochs.current[providerId] ?? 0;
+				polling.current.add(id);
 				fetch(`/api/connections/login/${encodeURIComponent(id)}`)
 					.then((r) => (r.ok ? (r.json() as Promise<LoginAttemptView>) : Promise.reject(new Error("poll"))))
-					.then((view) => alive.current && applyAttempt(providerId, view))
-					.catch(() => {});
+					.then((view) => {
+						const current = attemptsRef.current[providerId];
+						if (active && alive.current && epoch === (attemptEpochs.current[providerId] ?? 0) && current?.id === id && current.state === "pending") {
+							applyAttempt(providerId, view);
+						}
+					})
+					.catch(() => {})
+					.finally(() => polling.current.delete(id));
 			}
 		}, 1500);
-		return () => clearInterval(timer);
+		return () => {
+			active = false;
+			clearInterval(timer);
+		};
 	}, [pendingKey, applyAttempt]);
 
 	async function start(providerId: string) {
-		setBusyFor(providerId, true);
-		setErrorFor(providerId, null);
+		if (!beginMutation(providerId)) return;
+		const life = lifetime.current;
 		const r = await mutate("POST", "/api/connections/login", { providerId });
-		setBusyFor(providerId, false);
+		if (!alive.current || life !== lifetime.current) {
+			if (r.ok) cancelPendingLogins({ [providerId]: r.data as LoginAttemptView });
+			return;
+		}
+		endMutation(providerId);
 		if (!r.ok) return setErrorFor(providerId, r.error);
 		applyAttempt(providerId, r.data as LoginAttemptView);
 	}
 	async function answer(attempt: LoginAttemptView, promptId: string, value: string) {
-		setBusyFor(attempt.providerId, true);
+		if (attemptsRef.current[attempt.providerId]?.id !== attempt.id || !beginMutation(attempt.providerId)) return;
+		const life = lifetime.current;
 		const r = await mutate("POST", `/api/connections/login/${encodeURIComponent(attempt.id)}`, { promptId, value });
-		setBusyFor(attempt.providerId, false);
+		if (!alive.current || life !== lifetime.current) return;
+		endMutation(attempt.providerId);
 		if (!r.ok) return setErrorFor(attempt.providerId, r.error);
 		applyAttempt(attempt.providerId, r.data as LoginAttemptView);
 	}
 	async function cancel(attempt: LoginAttemptView) {
-		setBusyFor(attempt.providerId, true);
-		await mutate("DELETE", `/api/connections/login/${encodeURIComponent(attempt.id)}`);
-		setBusyFor(attempt.providerId, false);
-		setAttempts((a) => {
-			const { [attempt.providerId]: _gone, ...rest } = a;
-			return rest;
-		});
+		if (attemptsRef.current[attempt.providerId]?.id !== attempt.id || !beginMutation(attempt.providerId)) return;
+		const life = lifetime.current;
+		const r = await mutate("DELETE", `/api/connections/login/${encodeURIComponent(attempt.id)}`);
+		if (!alive.current || life !== lifetime.current) return;
+		endMutation(attempt.providerId);
+		if (!r.ok) return setErrorFor(attempt.providerId, r.error);
+		const view = r.data as LoginAttemptView;
+		if (view.state === "cancelled") setAttempt(attempt.providerId);
+		else applyAttempt(attempt.providerId, view);
 	}
 	async function disconnect(providerId: string) {
+		if (!beginMutation(providerId)) return;
+		const life = lifetime.current;
 		generation.current++; // invalidates any in-flight status read
-		setBusyFor(providerId, true);
-		setErrorFor(providerId, null);
 		const r = await mutate("DELETE", "/api/connections/subscriptions", { providerId });
-		setBusyFor(providerId, false);
+		if (!alive.current || life !== lifetime.current) return;
+		endMutation(providerId);
 		if (!r.ok) setErrorFor(providerId, r.error);
 		else {
+			setAttempt(providerId);
 			setStatuses((s) => (s ? s.map((x) => (x.id === providerId ? { ...x, connected: false, expires: undefined } : x)) : s));
 			notifySettingsSaved("keys");
 			notifySettingsSaved("models");

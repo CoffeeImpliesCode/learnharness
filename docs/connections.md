@@ -6,13 +6,17 @@ Open Settings → Connections. Existing API keys stay in Settings → Keys.
 
 ## Subscriptions
 
-Connect Codex, Claude or Grok using the login flow offered by the pinned pi-ai SDK. The app displays the browser link, device code or manual prompt returned by that adapter. Complete sign-in in your normal browser. Closing Connections cancels a pending attempt on a best-effort basis; the server expires abandoned attempts after ten minutes.
+Connect Codex, Claude or Grok using the login flow offered by the pinned pi-ai SDK. The app displays the browser link, device code or manual prompt returned by that adapter. Complete sign-in in your normal browser. Closing Connections cancels pending attempts on a best-effort basis, including attempts whose start response arrives after the panel closes; the server expires abandoned attempts after ten minutes. A failed Cancel request keeps its panel visible with an error so you can retry.
 
 A subscription has its own model-picker entry. For example, `subscription-anthropic` and `anthropic` select different authentication sources even when they name the same model. Connect first, then explicitly pick the desired models for the strong, cheap and vision slots. The same engine path serves teaching and practice; background jobs, extraction and compaction use the configured role or slot.
+
+The subscription alias stays in stored transcripts. At the SDK boundary, only that alias's assistant messages are mapped back to their native provider identity. This preserves same-model signed/encrypted reasoning and tool-call item IDs on later turns without changing stored provenance or retaining another model's signatures.
 
 A failed or disconnected subscription does not fall back to an API key. Disconnect removes the local credential without deleting learning records or changing model selections. It is not provider-side revocation, and a request already admitted may still finish. Existing Pi, Codex and Claude Code credential files are never read or imported.
 
 These flows are SDK capabilities, not a guarantee of account entitlement or provider approval for third-party clients. Codex uses the SDK's legacy route. Provider restrictions and available models may change. The application does not bypass a provider rejection. No account login or live subscription inference was performed as part of the automated tests.
+
+Anthropic's [credential policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use) restricts third-party applications from routing requests through Claude subscription credentials. The SDK's Claude login capability does not establish permission to use it. Use an API key or a provider-approved integration where required.
 
 ## Custom endpoints
 
@@ -37,3 +41,5 @@ Subscription models are labeled Subscription in the picker, not priced as API us
 ## Validation boundaries
 
 Tests use fake OAuth providers, isolated credential files and synthetic streaming responses. They cover refresh serialization, cancellation/disconnect races, auth-source separation and custom key binding. The production standalone build must include the SDK's dynamically loaded OAuth modules and callback page. A successful build or fake-provider request does not establish real-account entitlement, real refresh-token rotation or every supplier's multimodal/tool behavior.
+
+The personal fork additionally checks native Claude signed reasoning, Codex/Grok encrypted reasoning and Responses tool-call identity through the real SDK with synthetic transports. Mounted UI regressions cover stale polls, prompt changes, failed cancellation, connected-on-cancel and close-during-start. The standalone smoke starts Codex browser login, checks its PKCE authorization link and cancels without opening the link, exchanging tokens or running inference.
